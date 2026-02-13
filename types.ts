@@ -40,6 +40,25 @@ export interface AuthUser {
   name: string;
 }
 
+export interface GroundingSource {
+  title: string;
+  uri: string;
+}
+
+export interface ChatMessage {
+  role: 'user' | 'model';
+  text: string;
+  sources?: GroundingSource[];
+}
+
+export interface Recipe {
+  name: string;
+  time: string;
+  difficulty: 'Easy' | 'Medium' | 'Hard';
+  instructions: string[];
+  nutritionalBenefits: string;
+}
+
 export interface MealSuggestion {
   type: 'Breakfast' | 'Lunch' | 'Dinner' | 'Snack';
   name: string;

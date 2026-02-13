@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { FoodItem, UserProfile, DailyMealPlan, WeeklyMealPlan } from "../types";
+import { FoodItem, UserProfile, DailyMealPlan, WeeklyMealPlan, Recipe, GroundingSource } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
 
@@ -17,7 +17,7 @@ export const recognizeFood = async (base64Image: string): Promise<Partial<FoodIt
             }
           },
           {
-            text: "Analyze this food image with high cultural awareness. Identify global and regional specialties precisely (e.g., South Indian/Tamil Nadu dishes like Dosa, Idli, Sambar, or international foods like Sushi, Tacos, etc.). Estimate total calories and list the specific main ingredients. Provide nutritional estimates for Protein, Carbs, and Fat in grams based on standard preparations of these regional dishes."
+            text: "Analyze this food image. Identify the primary dish and its components. Estimate calories and macros (Protein, Carbs, Fat in grams). List the main ingredients clearly. If multiple items are present, provide a combined estimate."
           }
         ]
       },
@@ -26,71 +26,94 @@ export const recognizeFood = async (base64Image: string): Promise<Partial<FoodIt
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            name: { type: Type.STRING, description: "Common or traditional name of the food" },
-            calories: { type: Type.NUMBER, description: "Total calorie estimate" },
-            protein: { type: Type.NUMBER, description: "Estimated protein in grams" },
-            carbs: { type: Type.NUMBER, description: "Estimated carbohydrates in grams" },
-            fat: { type: Type.NUMBER, description: "Estimated fat in grams" },
-            ingredients: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "List of identified ingredients, including regional spices or components"
-            }
+            name: { type: Type.STRING },
+            calories: { type: Type.NUMBER },
+            protein: { type: Type.NUMBER },
+            carbs: { type: Type.NUMBER },
+            fat: { type: Type.NUMBER },
+            ingredients: { type: Type.ARRAY, items: { type: Type.STRING } }
           },
-          required: ["name", "calories", "ingredients", "protein", "carbs", "fat"]
+          required: ["name", "calories", "protein", "carbs", "fat", "ingredients"]
         }
       }
     });
 
-    const text = response.text;
-    if (!text) throw new Error("No response from AI");
-    
-    return JSON.parse(text);
+    return JSON.parse(response.text || '{}');
   } catch (error) {
-    console.error("Error recognizing food:", error);
+    console.error("Recognition error:", error);
     throw error;
   }
 };
 
-export const getNutritionAdvice = async (message: string, profile: UserProfile, chatHistory: { role: string, parts: any[] }[]) => {
+export const getNutritionAdvice = async (message: string, profile: UserProfile, history: any[]) => {
   try {
-    const chat = ai.chats.create({
-      model: 'gemini-3-pro-preview',
-      config: {
-        systemInstruction: `You are the NutriLens AI Health Assistant. Your expertise is STRICTLY limited to food, nutrition, recipes, calorie estimation, and dietary health. 
-
-RULES:
-1. ONLY answer questions about food, nutrition, calories, and healthy eating habits.
-2. If the user asks about ANY other topic (e.g., politics, coding, general trivia, weather, etc.), politely decline by saying something like: "I'm specialized only in nutrition and food. How can I help you with your diet today?"
-3. Always consider the user's current profile: Name: ${profile.name}, Goal: ${profile.goal}, Calories: ${profile.dailyGoal}, Weight: ${profile.weight}kg.
-4. Give concise, actionable advice.
-5. If estimating calories for a specific food, provide a range and mention it's an estimate.`,
-      },
-    });
-
-    // We pass the history manually in sendMessage if needed, but for simplicity we'll just send the current message
-    // and rely on the chat instance or reconstruct contents. Reconstructing contents is safer for sessionless.
     const response = await ai.models.generateContent({
       model: 'gemini-3-pro-preview',
       contents: [
-        ...chatHistory,
+        ...history,
         { role: 'user', parts: [{ text: message }] }
       ],
       config: {
-        systemInstruction: `You are the NutriLens AI Health Assistant. Your expertise is STRICTLY limited to food, nutrition, recipes, calorie estimation, and dietary health. 
-
-RULES:
-1. ONLY answer questions about food, nutrition, calories, and healthy eating habits.
-2. If the user asks about ANY other topic, politely decline and steer back to nutrition.
-3. Be friendly and professional.
-4. User Info: ${profile.name}, Goal: ${profile.goal}, Target: ${profile.dailyGoal}kcal.`
+        tools: [{ googleSearch: {} }],
+        systemInstruction: `You are NutriLens AI, a specialized nutrition expert. Use Google Search to provide accurate, evidence-based answers. User: ${profile.name}, Goal: ${profile.goal}, Weight: ${profile.weight}kg. Be concise and actionable.`
       }
     });
 
-    return response.text;
+    const sources: GroundingSource[] = [];
+    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+    if (chunks) {
+      chunks.forEach((chunk: any) => {
+        if (chunk.web) {
+          sources.push({ title: chunk.web.title, uri: chunk.web.uri });
+        }
+      });
+    }
+
+    return { text: response.text, sources };
   } catch (error) {
     console.error("Chat error:", error);
-    return "I'm having trouble connecting to the kitchen right now. Please try again later!";
+    return { text: "I'm having trouble fetching the latest nutrition data. Try asking something else!", sources: [] };
+  }
+};
+
+export const generateRecipeFromItem = async (foodName: string, ingredients: string[], profile: UserProfile): Promise<Recipe> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Create a healthy recipe for ${foodName} using these ingredients: ${ingredients.join(', ')}. 
+      Adjust for the user's goal: ${profile.goal}. Ensure the recipe is easy to follow.`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING },
+            time: { type: Type.STRING },
+            difficulty: { type: Type.STRING, enum: ["Easy", "Medium", "Hard"] },
+            instructions: { type: Type.ARRAY, items: { type: Type.STRING } },
+            nutritionalBenefits: { type: Type.STRING }
+          },
+          required: ["name", "time", "difficulty", "instructions", "nutritionalBenefits"]
+        }
+      }
+    });
+
+    return JSON.parse(response.text || '{}');
+  } catch (error) {
+    console.error("Recipe generation error:", error);
+    throw error;
+  }
+};
+
+export const getHealthInsight = async (stats: any, profile: UserProfile): Promise<string> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Based on today's consumption (${stats.calories}kcal) and user profile (${profile.goal}), give a one-sentence motivating health insight or tip for today. Be specific.`,
+    });
+    return response.text || "Keep up the great work on your health journey!";
+  } catch {
+    return "Hydration is the key to energy. Remember to drink water!";
   }
 };
 
@@ -111,11 +134,7 @@ const mealPlanSchema = {
           ingredients: { type: Type.ARRAY, items: { type: Type.STRING } },
           macros: {
             type: Type.OBJECT,
-            properties: {
-              protein: { type: Type.NUMBER },
-              carbs: { type: Type.NUMBER },
-              fat: { type: Type.NUMBER }
-            },
+            properties: { protein: { type: Type.NUMBER }, carbs: { type: Type.NUMBER }, fat: { type: Type.NUMBER } },
             required: ["protein", "carbs", "fat"]
           }
         },
@@ -127,63 +146,26 @@ const mealPlanSchema = {
 };
 
 export const generateMealPlan = async (profile: UserProfile): Promise<DailyMealPlan> => {
-  try {
-    const prompt = `STRICT REQUIREMENT: Generate a personalized daily meal plan for today consisting ONLY of authentic Indian Tamil Nadu regional cuisine (e.g., Idli, Dosa, Sambar, Rasam, Pongal, Chettinad dishes, Kootu, Poriyal, etc.).
-    Do not include any other international or global cuisines.
-    User Health Goal: ${profile.goal}.
-    Daily Nutritional Targets: Calories: ${profile.dailyGoal}kcal, Protein: ${profile.proteinGoal}g, Carbs: ${profile.carbsGoal}g, Fat: ${profile.fatGoal}g.
-    Allergies: ${profile.allergies.join(', ') || 'None'}.
-    Please ensure the portion sizes and ingredients are realistic for a healthy Tamil diet.`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: mealPlanSchema
-      }
-    });
-
-    const text = response.text;
-    if (!text) throw new Error("No response from AI");
-    return JSON.parse(text);
-  } catch (error) {
-    console.error("Error generating daily plan:", error);
-    throw error;
-  }
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `Generate a daily meal plan for health goal: ${profile.goal}. Targets: ${profile.dailyGoal}kcal. Prefer authentic healthy dishes.`,
+    config: { responseMimeType: "application/json", responseSchema: mealPlanSchema }
+  });
+  return JSON.parse(response.text || '{}');
 };
 
 export const generateWeeklyMealPlan = async (profile: UserProfile): Promise<WeeklyMealPlan> => {
-  try {
-    const prompt = `Generate a personalized 7-day meal plan (Monday to Sunday) consisting primarily of Indian Tamil Nadu specialties, while ensuring variety within the cuisine.
-    The user prefers authentic Tamil Nadu food.
-    Goal: ${profile.goal}. Daily Targets - Calories: ${profile.dailyGoal}kcal, Protein: ${profile.proteinGoal}g, Carbs: ${profile.carbsGoal}g, Fat: ${profile.fatGoal}g.
-    Allergies: ${profile.allergies.join(', ') || 'None'}.
-    Ensure each day is unique and nutritiously balanced according to the macro targets using South Indian/Tamil ingredients.`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            days: {
-              type: Type.ARRAY,
-              items: mealPlanSchema
-            }
-          },
-          required: ["days"]
-        }
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `Generate a 7-day meal plan for health goal: ${profile.goal}. Daily target: ${profile.dailyGoal}kcal.`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: { days: { type: Type.ARRAY, items: mealPlanSchema } },
+        required: ["days"]
       }
-    });
-
-    const text = response.text;
-    if (!text) throw new Error("No response from AI");
-    return JSON.parse(text);
-  } catch (error) {
-    console.error("Error generating weekly plan:", error);
-    throw error;
-  }
+    }
+  });
+  return JSON.parse(response.text || '{}');
 };
