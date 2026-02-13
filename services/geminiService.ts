@@ -2,7 +2,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { FoodItem, UserProfile, DailyMealPlan, WeeklyMealPlan, Recipe, GroundingSource } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+// Always initialize with process.env.API_KEY as per instructions
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const recognizeFood = async (base64Image: string): Promise<Partial<FoodItem>> => {
   try {
